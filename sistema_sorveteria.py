@@ -20,6 +20,7 @@ class BancoDeDados:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 nome TEXT NOT NULL,
                 qtd_por_caixa INTEGER DEFAULT 1,
+                estoque_minimo INTEGER DEFAULT 5,
                 estoque_total INTEGER DEFAULT 0
             )
         """)
@@ -48,14 +49,22 @@ class BancoDeDados:
             )
         """)
         self.conn.commit()
+        
+    # NOVO: Recebe estoque_minimo no cadastro
+    def cadastrar_produto(self, nome, qtd_por_caixa, estoque_minimo):
+        self.cursor.execute("""
+            INSERT INTO produtos (nome, qtd_por_caixa, estoque_minimo) 
+            VALUES (?, ?, ?)
+        """, (nome, qtd_por_caixa, estoque_minimo))
+        self.conn.commit()
 
-    # --- NOVO: Função de Atualizar (Editar) ---
-    def atualizar_produto(self, id_produto, novo_nome, nova_qtd_cx):
+    # NOVO: Atualiza também o estoque mínimo
+    def atualizar_produto(self, id_produto, novo_nome, nova_qtd_cx, novo_minimo):
         self.cursor.execute("""
             UPDATE produtos 
-            SET nome = ?, qtd_por_caixa = ? 
+            SET nome = ?, qtd_por_caixa = ?, estoque_minimo = ? 
             WHERE id = ?
-        """, (novo_nome, nova_qtd_cx, id_produto))
+        """, (novo_nome, nova_qtd_cx, novo_minimo, id_produto))
         self.conn.commit()
 
     # --- NOVO: Função de Excluir ---
@@ -66,9 +75,6 @@ class BancoDeDados:
         self.cursor.execute("DELETE FROM produtos WHERE id = ?", (id_produto,))
         self.conn.commit()
 
-    def cadastrar_produto(self, nome, qtd_por_caixa):
-        self.cursor.execute("INSERT INTO produtos (nome, qtd_por_caixa) VALUES (?, ?)", (nome, qtd_por_caixa))
-        self.conn.commit()
 
     def registrar_movimentacao(self, produto_id, tipo, caixas, unidades):
         # 1. Descobre quanto vale uma caixa para esse produto
@@ -125,13 +131,11 @@ class AppSorveteria:
     def __init__(self, root):
         self.db = BancoDeDados()
         self.root = root
-        self.root.title("Sistema Sorveteria 2.0")
-        # MUDANÇA 1: Abrir Maximizado (Tela Cheia)
-        # O comando 'zoomed' funciona para Windows.
+        self.root.title("Sistema Sorveteria 4.0 - Com Alertas de Estoque Mínimo")
+        
         try:
             self.root.state('zoomed')
         except:
-            # Caso esteja no Linux/Mac, usa geometria grande
             self.root.geometry("1000x700")
 
         self.notebook = ttk.Notebook(root)
@@ -145,7 +149,7 @@ class AppSorveteria:
         self.notebook.add(self.frame_movim, text="Entrada/Saída")
         
         self.frame_estoque = ttk.Frame(self.notebook)
-        self.notebook.add(self.frame_estoque, text="Gerenciar Estoque") # Nome mudou
+        self.notebook.add(self.frame_estoque, text="Gerenciar Estoque")
         
         self.frame_relatorio = ttk.Frame(self.notebook)
         self.notebook.add(self.frame_relatorio, text="Relatórios")
@@ -168,18 +172,29 @@ class AppSorveteria:
         self.entry_cx_tam.insert(0, "1")
         self.entry_cx_tam.pack(pady=5)
 
+        # NOVO: Campo Estoque Mínimo
+        ttk.Label(self.frame_cadastro, text="Estoque Mínimo (Alerta):").pack(pady=5)
+        self.entry_minimo = ttk.Entry(self.frame_cadastro)
+        self.entry_minimo.insert(0, "10") # Valor padrão sugerido
+        self.entry_minimo.pack(pady=5)
+
         ttk.Button(self.frame_cadastro, text="Salvar Produto", command=self.acao_salvar_produto).pack(pady=20)
 
     def acao_salvar_produto(self):
-        nome = self.entry_nome.get()
+        # MUDANÇA: .upper() converte tudo para maiúsculo
+        nome = self.entry_nome.get().strip().upper() 
         cx_tam = self.entry_cx_tam.get()
-        if nome and cx_tam:
+        minimo = self.entry_minimo.get()
+
+        if nome and cx_tam and minimo:
             try:
-                self.db.cadastrar_produto(nome, int(cx_tam))
+                self.db.cadastrar_produto(nome, int(cx_tam), int(minimo))
                 messagebox.showinfo("Sucesso", f"{nome} cadastrado!")
                 self.entry_nome.delete(0, tk.END)
+                self.entry_nome.focus()
+                self.atualizar_lista_combo() 
             except ValueError:
-                messagebox.showerror("Erro", "Tamanho da caixa deve ser número.")
+                messagebox.showerror("Erro", "Valores numéricos inválidos.")
         else:
             messagebox.showwarning("Atenção", "Preencha todos os campos.")
 
@@ -233,9 +248,8 @@ class AppSorveteria:
         else:
             messagebox.showwarning("Erro", "Selecione produto e tipo.")
 
-    # --- ESTOQUE (COM EDITAR E EXCLUIR) ---
+    # --- ESTOQUE (COM ALERTAS) ---
     def montar_aba_estoque(self):
-        # Botões de Ação no Topo
         frame_botoes = ttk.Frame(self.frame_estoque)
         frame_botoes.pack(pady=10)
         
@@ -243,32 +257,49 @@ class AppSorveteria:
         ttk.Button(frame_botoes, text="Editar Selecionado", command=self.janela_editar).pack(side=tk.LEFT, padx=5)
         ttk.Button(frame_botoes, text="Excluir Selecionado", command=self.acao_excluir).pack(side=tk.LEFT, padx=5)
 
-        # Tabela
-        colunas = ('ID', 'Produto', 'Padrão cx', 'Visual', 'Total Unid.')
+        # NOVO: Coluna 'Mínimo' adicionada
+        colunas = ('ID', 'Produto', 'Padrão cx', 'Mínimo', 'Visual', 'Total Unid.')
         self.tree_estoque = ttk.Treeview(self.frame_estoque, columns=colunas, show='headings')
         
         self.tree_estoque.heading('ID', text='ID')
         self.tree_estoque.heading('Produto', text='Produto')
         self.tree_estoque.heading('Padrão cx', text='Padrão cx')
+        self.tree_estoque.heading('Mínimo', text='Mínimo') # Nova coluna
         self.tree_estoque.heading('Visual', text='Estoque Visual')
         self.tree_estoque.heading('Total Unid.', text='Total')
         
-        self.tree_estoque.column('ID', width=30)
-        self.tree_estoque.column('Padrão cx', width=80)
-        self.tree_estoque.column('Visual', width=200)
+        self.tree_estoque.column('ID', width=40, anchor=tk.CENTER)
+        self.tree_estoque.column('Padrão cx', width=80, anchor=tk.CENTER)
+        self.tree_estoque.column('Mínimo', width=80, anchor=tk.CENTER)
+        self.tree_estoque.column('Visual', width=200, anchor=tk.W)
+        self.tree_estoque.column('Total Unid.', width=80, anchor=tk.CENTER)
+        
+        # NOVO: Configurando a cor da Tag 'perigo'
+        # 'salmon' é um vermelho suave que não atrapalha a leitura do texto preto
+        self.tree_estoque.tag_configure('perigo', background='#ffcccc') 
         
         self.tree_estoque.pack(fill='both', expand=True, padx=10, pady=10)
 
     def carregar_estoque(self):
         for item in self.tree_estoque.get_children():
             self.tree_estoque.delete(item)
+        
         produtos = self.db.listar_produtos()
         for p in produtos:
-            p_id, p_nome, p_padrao, p_total = p
+            # Estrutura agora é: (id, nome, qtd_por_caixa, estoque_minimo, estoque_total)
+            p_id, p_nome, p_padrao, p_minimo, p_total = p
+            
             caixas = p_total // p_padrao if p_padrao > 0 else 0
             soltos = p_total % p_padrao if p_padrao > 0 else p_total
             visual = f"{caixas} Cxs e {soltos} Unid."
-            self.tree_estoque.insert('', tk.END, values=(p_id, p_nome, p_padrao, visual, p_total))
+            
+            # NOVO: Lógica do Alerta
+            # Se o total for menor que o mínimo, aplicamos a tag 'perigo'
+            minha_tag = ()
+            if p_total < p_minimo:
+                minha_tag = ('perigo',)
+            
+            self.tree_estoque.insert('', tk.END, values=(p_id, p_nome, p_padrao, p_minimo, visual, p_total), tags=minha_tag)
 
     def acao_excluir(self):
         selecionado = self.tree_estoque.selection()
@@ -294,14 +325,15 @@ class AppSorveteria:
             return
 
         item = self.tree_estoque.item(selecionado[0])
+        # values = (id, nome, padrao, minimo, visual, total)
         id_prod = item['values'][0]
         nome_atual = item['values'][1]
         padrao_atual = item['values'][2]
+        minimo_atual = item['values'][3] # Pegando o valor atual
 
-        # Criar Janela Popup (Toplevel)
         janela_edit = Toplevel(self.root)
         janela_edit.title("Editar Produto")
-        janela_edit.geometry("300x200")
+        janela_edit.geometry("300x280") # Aumentei um pouco a altura
 
         ttk.Label(janela_edit, text="Nome:").pack(pady=5)
         ent_nome = ttk.Entry(janela_edit, width=30)
@@ -312,17 +344,28 @@ class AppSorveteria:
         ent_padrao = ttk.Entry(janela_edit)
         ent_padrao.insert(0, padrao_atual)
         ent_padrao.pack(pady=5)
+        
+        # NOVO: Editar o Mínimo também
+        ttk.Label(janela_edit, text="Estoque Mínimo:").pack(pady=5)
+        ent_minimo = ttk.Entry(janela_edit)
+        ent_minimo.insert(0, minimo_atual)
+        ent_minimo.pack(pady=5)
 
         def salvar_edicao():
             try:
-                novo_nome = ent_nome.get()
+                # MUDANÇA: .upper() aqui também
+                novo_nome = ent_nome.get().strip().upper()
                 novo_padrao = int(ent_padrao.get())
-                self.db.atualizar_produto(id_prod, novo_nome, novo_padrao)
-                self.carregar_estoque() # Atualiza a lista principal
-                janela_edit.destroy() # Fecha a janelinha
+                novo_minimo = int(ent_minimo.get())
+                
+                self.db.atualizar_produto(id_prod, novo_nome, novo_padrao, novo_minimo)
+                self.carregar_estoque()
+                self.atualizar_lista_combo() 
+                
+                janela_edit.destroy()
                 messagebox.showinfo("Sucesso", "Produto atualizado!")
             except ValueError:
-                messagebox.showerror("Erro", "Padrão deve ser número.")
+                messagebox.showerror("Erro", "Valores devem ser números.")
 
         ttk.Button(janela_edit, text="Salvar Alterações", command=salvar_edicao).pack(pady=20)
 
@@ -338,7 +381,22 @@ class AppSorveteria:
 
         colunas = ('Produto', 'Tipo', 'Caixas', 'Soltos', 'Data')
         self.tree_relatorio = ttk.Treeview(self.frame_relatorio, columns=colunas, show='headings')
-        for col in colunas: self.tree_relatorio.heading(col, text=col)
+        
+        self.tree_relatorio.heading('Produto', text='Produto')
+        self.tree_relatorio.column('Produto', width=300, anchor=tk.W)
+
+        self.tree_relatorio.heading('Tipo', text='Tipo')
+        self.tree_relatorio.column('Tipo', width=100, anchor=tk.CENTER)
+
+        self.tree_relatorio.heading('Caixas', text='Cxs')
+        self.tree_relatorio.column('Caixas', width=50, anchor=tk.CENTER)
+
+        self.tree_relatorio.heading('Soltos', text='Unid')
+        self.tree_relatorio.column('Soltos', width=50, anchor=tk.CENTER)
+
+        self.tree_relatorio.heading('Data', text='Data/Hora')
+        self.tree_relatorio.column('Data', width=150, anchor=tk.CENTER)
+
         self.tree_relatorio.pack(fill='both', expand=True, padx=10, pady=10)
 
     def acao_gerar_relatorio(self):
